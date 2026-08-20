@@ -1,172 +1,69 @@
-# 🎼 AI MIDI 音樂生成器 (PySide6 + Groq + Mido)
+# aimidigen
 
-> 以 **Groq LLM** 生成「嚴格 JSON」音符序列，並用 **Mido** 寫入 MIDI；提供 **PySide6** 圖形介面與進度回報，一鍵產生、播放、導出。
+A desktop app that asks an LLM for a note list in strict JSON and writes the result to a `.mid` file.
 
----
+Chat models are good at describing music and unreliable at emitting well-formed JSON, especially when the response is long enough to hit a token limit and get cut mid-object. This project treats that as the actual engineering problem: the prompt pins the schema down hard, and `parse_json_notes` recovers usable data from truncated replies instead of failing the request. The rest is a PySide6 window with a style prompt, a length selector, a General MIDI instrument picker, and buttons to play or export the file.
 
-## 📘 專案簡介
+## How it works
 
-本工具透過雲端 LLM 產生**只含 JSON** 的音符資料，再將其轉換為標準 MIDI 檔（`.mid`）。  
-支援旋律與和聲（同一拍多音），可設定小節數與樂器音色，內建進度條、載入動畫與產出後的播放與導出。
+Everything is in `main.py`, split into a worker thread and a widget.
 
-**設計目標**
-- 每次生成的開頭不同且符合風格
-- 在同一個 **key** 與節奏下產生旋律與和弦
-- 嚴格 JSON 輸出，並包含容錯解析
+### `MusicGeneratorThread(QThread)`
 
----
+1. **Prompt construction.** Builds an instruction that fixes the output schema (`pitch`, `start_time`, `duration`, `velocity`), states the tempo grid as 4/4 with `480 ticks = 1 beat`, gives the requested bar count, constrains velocity to 40 to 100, includes a worked example, and asks for chords by requiring several notes to share a `start_time`. Sent with `temperature: 0.3` and `max_tokens: 2000`.
+2. **Request.** A plain `requests.post` to `https://api.groq.com/openai/v1/chat/completions`, the OpenAI-compatible endpoint, with a system message repeating the JSON-only constraint. Non-200 responses emit an empty result and the UI reports failure.
+3. **Tolerant parsing.** `parse_json_notes` runs three escalating attempts:
+   - `json.loads` on the raw text.
+   - Append whichever of `]` and `}` are missing, then retry. This covers the common case where generation stopped one or two characters short.
+   - Walk the object list backwards with `re.finditer(r'\{[^}]*\}')`, drop the last complete note, reclose the array, and retry. Repeat until it parses or nothing is left. A reply cut off inside a note object still yields every note before the break.
+4. **MIDI writing.** `create_midi_from_notes` sorts notes by `start_time`, groups them with `itertools.groupby`, emits a `program_change` for the selected instrument, and writes `note_on` / `note_off` pairs into a single `mido` track with `ticks_per_beat = 480`. Output goes to `generated_music.mid`, with `get_unique_filename` appending a counter rather than overwriting previous runs.
 
-## 🧩 主要功能
+### `MusicGeneratorApp(QWidget)`
 
-- 風格提示（Style Prompt）→ 生成旋律＋和聲
-- 長度選擇：4 / 8 / 16 / 32 小節（4/4，`480 ticks = 1 拍`）
-- 樂器音色（**Program Change**）下拉選擇
-- 進度條與載入動畫
-- 生成後：**播放 MIDI**、**導出 MIDI**
-- 失敗重試提示與 UI 控制狀態管理
+The window holds the style input, a bar-count combo (4, 8, 16, 32), an instrument combo carrying GM program numbers as item data, a progress bar and an animated loading label driven by a `QTimer`. Generation runs on the worker thread and communicates back through two Qt signals, `progress_signal` and `generation_done_signal`, so the UI stays responsive. Playback hands the file to the OS default handler (`os.startfile`, `open` or `xdg-open` by platform); export copies it to a path chosen through `QFileDialog`.
 
----
+## Tech stack
 
-## 🖥️ 介面與操作流程
+Python 3, PySide6 for the UI, `mido` for MIDI serialization, `requests` for the HTTP call, Groq's OpenAI-compatible chat completions API as the model backend.
 
-1. 輸入音樂風格（如：*hip‑hop, jazz, funk*）。  
-2. 選擇小節數與樂器音色。  
-3. 按「產生 MIDI」。UI 顯示載入與進度。  
-4. 生成成功後可直接「播放 MIDI」或「導出 MIDI」。
+## Getting started
 
----
+You need a Groq API key.
 
-## 🧮 LLM 輸出資料格式（嚴格 JSON）
-
-模型需回傳**僅 JSON**：
-
-```json
-{
-  "notes": [
-    { "pitch": 64, "start_time": 0,   "duration": 480, "velocity": 80 },
-    { "pitch": 67, "start_time": 0,   "duration": 480, "velocity": 70 },
-    { "pitch": 71, "start_time": 0,   "duration": 480, "velocity": 60 },
-    { "pitch": 72, "start_time": 480, "duration": 240, "velocity": 80 }
-  ]
-}
-```
-
-規則：
-- `pitch`：0–127 的 MIDI 音高
-- `start_time`：以 **tick** 計（`ticks_per_beat = 480`）
-- `duration`：tick 長度
-- `velocity`：40–100 之間
-- **和弦**：相同 `start_time` 的多個音符同時發聲
-
----
-
-## ⚙️ 安裝需求
-
-| 套件 | 用途 | 安裝 |
-|---|---|---|
-| Python 3.9+ | 執行環境 | — |
-| `PySide6` | GUI | `pip install PySide6` |
-| `requests` | 呼叫 API | `pip install requests` |
-| `mido` | 寫入 MIDI | `pip install mido` |
-| `python-rtmidi`* | 若需即時回放 | `pip install python-rtmidi` |
-
-\* 本專案以**開啟系統預設播放器**播放 `.mid`。如需內嵌播放，可自行整合 `mido` + `python-rtmidi`。
-
-**一次安裝**
 ```bash
-pip install PySide6 requests mido python-rtmidi
+pip install PySide6 mido requests
 ```
 
----
+Open `main.py` and replace the placeholder on line 11:
 
-## 🔑 API 設定（Groq）
+```python
+API_KEY = "xxx"
+```
 
-- 於程式中設定：`API_KEY`、`API_URL`、`MODEL_NAME`  
-  ```python
-  API_KEY = "你的金鑰"
-  API_URL = "https://api.groq.com/openai/v1/chat/completions"
-  MODEL_NAME = "llama-3.1-70b-versatile"
-  ```
-- 建議改用**環境變數**並在程式讀取：
-  - Windows：`setx GROQ_API_KEY "xxxxx"`
-  - macOS / Linux：`export GROQ_API_KEY="xxxxx"`
-
-> 務必避免將金鑰提交到版本庫。
-
----
-
-## ▶️ 執行
+Then run it:
 
 ```bash
 python main.py
 ```
 
-- 生成完成後，點「播放 MIDI」會使用**系統預設應用**開啟檔案。
-- 「導出 MIDI」可選擇儲存路徑。
+Type a style such as `jazz` or `hip-hop`, pick a length and an instrument, and press the generate button. The raw model output is printed to stdout, which is the fastest way to see what the parser had to work with.
 
----
+Note that `requirements.txt` is out of date. It pins `pygame`, `python-rtmidi` and `pyfluidsynth`, none of which the current `main.py` imports, and it omits `requests`, which is required. The pip command above reflects the actual imports.
 
-## 🧠 程式架構
+## Status and limitations
 
-```
-main.py
-│
-├─ MusicGeneratorThread(QThread)
-│  ├─ 構建強化 Prompt → 呼叫 Groq API
-│  ├─ 解析嚴格 JSON（容錯處理：補齊、裁切）
-│  └─ create_midi_from_notes() 生成 MIDI（含 Program Change）
-│
-├─ MusicGeneratorApp(QWidget)
-│  ├─ 風格 / 小節 / 樂器 UI
-│  ├─ 進度條、載入動畫、結果提示
-│  ├─ 播放（呼叫系統預設）與導出
-│  └─ 例外處理與執行緒管理
-```
+A working single-file prototype. Honest about what it is: a tool for generating a starting point to drag into a DAW, not a composition system.
 
-**MIDI 寫入重點**
-- `mid.ticks_per_beat = 480`
-- 依 `start_time` 分組，同步 `note_on`
-- 立即寫入對應 `note_off`（簡化處理；如需更精確可改為事件排程表）
+- **Chords are written incorrectly.** `create_midi_from_notes` appends each `note_off` immediately after its `note_on` with `time=duration`. Because `mido` message times are deltas, notes sharing a `start_time` end up sequential rather than simultaneous, so the chords requested in the prompt come out as arpeggios. The source comments flag this as a deliberate simplification, and fixing it means buffering note-off events and scheduling them against absolute time.
+- **Timing drifts.** For the same reason, `current_time` is advanced to `start_time` without accounting for the durations already written, so the delta computed for each following group is wrong once any note has been emitted.
+- The progress bar is driven by a `msleep(10)` per MIDI message inside the write loop, so it reports an artificial delay rather than real work.
+- `API_KEY` is a module-level constant that has to be edited in source. There is no environment variable support and no `.env` handling.
+- `MODEL_NAME` is pinned to `llama-3.1-70b-versatile`. Providers retire model identifiers, so this may need updating before the app will run.
+- Playback opens the system default `.mid` handler. There is no in-app synthesis, so on a machine with nothing registered for MIDI the play button does nothing useful.
+- No tests, no packaging, no retry loop when the model returns unparseable output.
 
----
+Not implemented, and plausible next steps: correct note-off scheduling, reading the key from the environment, an embedded synth for preview, multi-track output with separate melody and chord tracks, and a seed or history so a good result can be regenerated.
 
-## 🔧 參數與可調項
+## License
 
-- **小節數**：4 / 8 / 16 / 32（每小節 4 拍）  
-- **Program Number**：標準 GM 音色號（0 = Acoustic Grand Piano …）  
-- **LLM**：`MODEL_NAME`、`temperature`、`max_tokens` 可視風格調整  
-- **強化 Prompt**：已要求「同一 key、旋律＋和聲、每次開頭不同、節奏多變」
-
----
-
-## ❗ 常見問題（FAQ）
-
-**Q1：API 回傳非 JSON 導致失敗？**  
-A：已內建容錯解析與補齊；若仍失敗，請降低 `temperature` 或縮短小節。
-
-**Q2：播放按鈕沒反應？**  
-A：系統需關聯 `.mid` 的預設播放器。或手動用 DAW / 播放器開啟。
-
-**Q3：和弦太少或旋律單調？**  
-A：提高 `bars`，或在風格中加入「和弦豐富、節奏切分、多段發展」。
-
-**Q4：需要實時聽到輸出？**  
-A：整合 `mido + python-rtmidi` 或其他合成器，即時送出 MIDI。
-
----
-
-## 🧱 專案結構範例
-
-```
-📂 ai-midi-generator
-├─ main.py
-└─ README.md
-```
-
----
-
-## 🔐 安全建議
-
-- 使用環境變數儲存 API Key。
-- 排除敏感檔案（`.env`、測試 MIDI）於 `.gitignore`。
-- 控制權限與用量上限，避免濫用。
+MIT. See [LICENSE](LICENSE).
